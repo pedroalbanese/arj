@@ -21,7 +21,7 @@ A modern, portable ARJ implementation in Go. Method 4 compression, method 0/4 de
 ## Installation
 
 ```bash
-git clone https://github.com/seu-usuario/arj.git
+git clone https://github.com/pedroalbanese/arj.git
 cd arj
 go mod tidy
 go build -ldflags=-s -o arj .
