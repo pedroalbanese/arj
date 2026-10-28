@@ -93,7 +93,7 @@ Notes:
   - Compression uses method 4 (LZ77/LZSS).
   - Decompression accepts methods 0 (stored) and 4.
   - Encryption uses Kuznyechik (GOST R 34.12-2015).
-  - CRC32 is kept for header compatibilityz.
+  - CRC32 is kept for header compatibility.
 `)
 }
 
