@@ -76,19 +76,25 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `Usage: arj <command> archive.arj [args...]
+	fmt.Fprintf(os.Stderr, `ARJ Evolved — The ARJ format, modernized with Kuznyechik encryption.
 
-Commands:
-  a, add       Create archive (method 4) from files
-  l, list      List archive contents
-  x, extract   Extract files (to current directory)
-  t, test      Test archive integrity
-  -h, --help   Show this help
+Usage:     arj <command> [-<sw> [-<sw>...]] <archive_name> [<file_names>...]
+Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
 
-Options:
-  -gPASSWORD   Encrypt (add) / decrypt (extract, test) with Kuznyechik.
-               IV derived from modifier via Streebog-256.
-               Examples: -gsecret | -g secret`)
+<Commands>
+  a: Add files to archive               l: List contents of archive
+  x: eXtract files with full pathname   t: Test integrity of archive
+  -h: Show this help                    -?: Same as -h
+
+<Switches>
+  g: Garble with password (Kuznyechik)  y: assume Yes on all queries
+
+Notes:
+  - Compression uses method 4 (LZ77/LZSS).
+  - Decompression accepts methods 0 (stored) and 4.
+  - Encryption uses Kuznyechik (GOST R 34.12-2015).
+  - CRC32 is kept for header compatibilityz.
+`)
 }
 
 func fail(format string, a ...interface{}) {
