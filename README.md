@@ -49,6 +49,15 @@ go mod tidy
 go build -ldflags=-s -o arj .
 ``` 
 
+## Contribute
+**Use issues for everything**
+- You can help and get help by:
+  - Reporting doubts and questions
+- You can contribute by:
+  - Reporting issues
+  - Suggesting new features or enhancements
+  - Improve/fix documentation
+
 
 ## License
 
