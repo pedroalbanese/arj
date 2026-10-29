@@ -91,7 +91,7 @@ Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
 
 Notes:
   - Compression uses method 4 (LZ77/LZSS).
-  - Decompression accepts methods 0 (stored) and 4.
+  - Decompression accepts methods 0–4.
   - Encryption uses Kuznyechik (GOST R 34.12-2015).
   - CRC32 is kept for header compatibility.
 `)
