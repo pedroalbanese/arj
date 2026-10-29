@@ -9,7 +9,7 @@ const (
 	CBIT       = 9
 	TBIT       = 5
 	PBIT       = 5
-	NC         = 255
+	NC         = 510 
 	NP         = 16
 	NT         = 19
 	CTABLESIZE = 4096
