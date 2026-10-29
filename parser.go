@@ -10,7 +10,7 @@ import (
 )
 
 // ===========================================================================
-// Constantes de defines.h
+// Constants from defines.h
 // ===========================================================================
 
 const (
@@ -50,7 +50,7 @@ const (
 )
 
 // ===========================================================================
-// Cabeçalho analisado
+// Parsed header
 // ===========================================================================
 
 type ARJHeader struct {
@@ -112,11 +112,11 @@ func OpenARJ(path string) (*ARJArchive, error) {
 	hdr, err := a.readHeader(true)
 	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("arj: cabeçalho principal: %w", err)
+		return nil, fmt.Errorf("arj: main header: %w", err)
 	}
 	if hdr == nil {
 		f.Close()
-		return nil, fmt.Errorf("arj: arquivo vazio")
+		return nil, fmt.Errorf("arj: empty archive")
 	}
 	a.mainHdr = hdr
 	return a, nil
@@ -152,7 +152,7 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 
 	hdrID := binary.LittleEndian.Uint16(prefix[0:2])
 	if hdrID != HEADER_ID {
-		return nil, fmt.Errorf("assinatura inválida: 0x%04X (esperado 0x%04X)", hdrID, HEADER_ID)
+		return nil, fmt.Errorf("bad signature: 0x%04X (want 0x%04X)", hdrID, HEADER_ID)
 	}
 
 	basicHdrSize := binary.LittleEndian.Uint16(prefix[2:4])
@@ -160,12 +160,12 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 		return nil, nil
 	}
 	if basicHdrSize > HEADERSIZE_MAX {
-		return nil, fmt.Errorf("cabeçalho muito grande: %d", basicHdrSize)
+		return nil, fmt.Errorf("header too large: %d", basicHdrSize)
 	}
 
 	remaining := int(basicHdrSize) - (FIRST_HDR_SIZE - 4)
 	if remaining < 0 {
-		return nil, fmt.Errorf("basic_hdr_size muito pequeno: %d", basicHdrSize)
+		return nil, fmt.Errorf("basic_hdr_size too small: %d", basicHdrSize)
 	}
 	rest := make([]byte, remaining)
 	if _, err := io.ReadFull(a.f, rest); err != nil {
@@ -181,7 +181,7 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 	storedCRC := binary.LittleEndian.Uint32(crcBuf)
 	computedCRC := crc32.ChecksumIEEE(basicHdr)
 	if storedCRC != computedCRC {
-		return nil, fmt.Errorf("CRC do cabeçalho não confere: armazenado 0x%08X, calculado 0x%08X",
+		return nil, fmt.Errorf("header CRC mismatch: stored 0x%08X, computed 0x%08X",
 			storedCRC, computedCRC)
 	}
 
@@ -236,12 +236,12 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 		}
 	}
 
-	// O nome do arquivo começa no offset first_hdr_size do cabeçalho local.
-	// O basicHdr começa no offset 0x04 do arquivo, então o nome está em
+	// The filename starts at the first_hdr_size offset of the local header.
+	// The basicHdr starts at offset 0x04 of the file, so the filename is at
 	// basicHdr[first_hdr_size - 4].
 	nameStart := int(hdr.FirstHdrSize)
 	if nameStart < 0 || nameStart >= len(basicHdr) {
-		return nil, fmt.Errorf("FirstHdrSize inválido: %d (tamanho do basicHdr=%d)",
+		return nil, fmt.Errorf("invalid FirstHdrSize: %d (basicHdr len=%d)",
 			hdr.FirstHdrSize, len(basicHdr))
 	}
 	nameEnd := -1
@@ -252,7 +252,7 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 		}
 	}
 	if nameEnd < 0 {
-		return nil, fmt.Errorf("nome de arquivo sem terminador")
+		return nil, fmt.Errorf("unterminated filename")
 	}
 	hdr.Filename = string(basicHdr[nameStart:nameEnd])
 
@@ -265,7 +265,7 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 		}
 	}
 	if commentEnd < 0 {
-		return nil, fmt.Errorf("comentário sem terminador")
+		return nil, fmt.Errorf("unterminated comment")
 	}
 	hdr.Comment = string(basicHdr[commentStart:commentEnd])
 
@@ -307,7 +307,7 @@ func (a *ARJArchive) readExtendedHeaders() ([]byte, error) {
 		stored := binary.LittleEndian.Uint32(crcBuf[:])
 		computed := crc32.ChecksumIEEE(block)
 		if stored != computed {
-			return nil, fmt.Errorf("CRC do cabeçalho estendido não confere")
+			return nil, fmt.Errorf("extended header CRC mismatch")
 		}
 		all = append(all, sizeBuf[:]...)
 		all = append(all, block...)
@@ -316,7 +316,7 @@ func (a *ARJArchive) readExtendedHeaders() ([]byte, error) {
 }
 
 // ===========================================================================
-// Extração
+// Extraction
 // ===========================================================================
 
 func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
@@ -332,7 +332,7 @@ func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 
 	if hdr.HasFlag(GARBLED_FLAG) {
 		if a.Password == "" {
-			return fmt.Errorf("arquivo criptografado; use -gSENHA")
+			return fmt.Errorf("encrypted file; use -gPASSWORD")
 		}
 		modifier := buildModifier(hdr.Timestamp, hdr.PasswordMod)
 		cipher := &ARJCrypt{}
@@ -356,12 +356,12 @@ func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 		d := newARJDecoder(compressed, int64(hdr.OriginalSize), 0, extract)
 		return d.decodeF()
 	default:
-		return fmt.Errorf("arj: método não suportado %d", hdr.Method)
+		return fmt.Errorf("arj: unsupported method %d", hdr.Method)
 	}
 }
 
 // ===========================================================================
-// Listagem
+// Listing
 // ===========================================================================
 
 func listARJ(path string) error {
@@ -406,14 +406,14 @@ func listARJ(path string) error {
 		sizeWidth = 9
 	}
 
-	fmt.Printf("Arquivo: %s\n", path)
-	fmt.Printf("  Versão: %d.%02d  Sistema: %d  Flags: 0x%02X\n",
+	fmt.Printf("Archive: %s\n", path)
+	fmt.Printf("  Version: %d.%02d  Host OS: %d  Flags: 0x%02X\n",
 		mh.Version/10, mh.Version%10, mh.HostOS, mh.Flags)
 	fmt.Println()
 
-	// Cabeçalho (5 colunas, 1 espaço entre Hora e Modo, 1 entre Modo e Nome)
+	// Header (5 columns, 1 space between Time and Mode, 1 between Mode and Name)
 	fmt.Printf("  %-*s  %-10s %-5s %-10s %s\n",
-		sizeWidth, "Tamanho", "Data", "Hora", "Modo", "Nome")
+		sizeWidth, "Length", "Date", "Time", "Mode", "Name")
 	fmt.Printf("  %s  %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
@@ -427,14 +427,14 @@ func listARJ(path string) error {
 			sizeWidth, e.hdr.OriginalSize, e.date, e.time, mode, e.hdr.Filename)
 	}
 
-	// Rodapé (mesmos espaços do cabeçalho)
+	// Footer (same spacing as the header)
 	fmt.Printf("  %s  %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
 		strings.Repeat("-", 5),
 		strings.Repeat("-", 10),
 		"-------")
-	fmt.Printf("  %*d  %s %s %s %d arquivos\n",
+	fmt.Printf("  %*d  %s %s %s %d files\n",
 		sizeWidth, total,
 		strings.Repeat(" ", 10),
 		strings.Repeat(" ", 5),
@@ -444,7 +444,7 @@ func listARJ(path string) error {
 	return nil
 }
 
-// formatFileMode converte o file_mode (uint16) em uma string tipo "rwxr-xr-x".
+// formatFileMode converts the file_mode (uint16) into a string like "rwxr-xr-x".
 func formatFileMode(mode uint16) string {
 	if mode == 0 {
 		return "----------"
