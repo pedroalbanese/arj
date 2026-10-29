@@ -5,7 +5,7 @@
 [![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/pedroalbanese/arj)](https://golang.org)
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/pedroalbanese/arj)](https://github.com/pedroalbanese/arj/releases)
 
-A modern, portable ARJ implementation in Go. Method 4 compression, method 0/4 decompression, Kuznyechik encryption (GOST R 34.12-2015) with Streebog-256 IV derivation. No external binaries.
+A modern, portable ARJ implementation in Go. Method 4 compression, method 0–4 decompression, Kuznyechik encryption (GOST R 34.12-2015) with Streebog-256 IV derivation. No external binaries.
 
 ## Features
 
