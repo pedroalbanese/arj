@@ -12,7 +12,7 @@ A modern, portable ARJ implementation in Go. Method 4 compression, method 0/4 de
 | Component | Original ARJ | This project |
 |---|---|---|
 | Compression | Methods 0–4 | Method 4 (LZ77/LZSS) |
-| Decompression | Methods 0–4 | Methods 0 (stored) and 4 |
+| Decompression | Methods 0–4 | Methods 0-4 (kept) |
 | Encryption | GOST 28147-89 (obsolete) | Kuznyechik (GOST R 34.12-2015) |
 | IV derivation | 8-byte modifier | Streebog-256(modifier) → 16 bytes |
 | Integrity | CRC32 | CRC32 (kept) |
@@ -35,7 +35,7 @@ Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
 
 Notes:
   - Compression uses method 4 (LZ77/LZSS).
-  - Decompression accepts methods 0 (stored) and 4.
+  - Decompression accepts methods 0-4.
   - Encryption uses Kuznyechik (GOST R 34.12-2015).
   - CRC32 is kept for header compatibility.
 ```
