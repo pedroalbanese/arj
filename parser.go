@@ -239,11 +239,10 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 	// O filename começa no offset first_hdr_size do header local.
 	// O basicHdr começa no offset 0x04 do arquivo, então o filename está em
 	// basicHdr[first_hdr_size - 4].
-	// O main.go grava first_hdr_size = 46 (offset do filename no header local).
-	// O filename está em basicHdr[46 - 4] = basicHdr[42].
 	nameStart := int(hdr.FirstHdrSize)
 	if nameStart < 0 || nameStart >= len(basicHdr) {
-		return nil, fmt.Errorf("invalid FirstHdrSize: %d", hdr.FirstHdrSize)
+		return nil, fmt.Errorf("invalid FirstHdrSize: %d (basicHdr len=%d)",
+			hdr.FirstHdrSize, len(basicHdr))
 	}
 	nameEnd := -1
 	for i := nameStart; i < len(basicHdr); i++ {
@@ -331,8 +330,6 @@ func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 	}
 	a.pos += int64(hdr.CompressedSize)
 
-	// Descriptografia GOST (se o arquivo estiver marcado como GARBLED).
-	// O modifier é {timestamp, password_mod} — o mesmo que o encrypt usa.
 	if hdr.HasFlag(GARBLED_FLAG) {
 		if a.Password == "" {
 			return fmt.Errorf("encrypted file; use -gPASSWORD")
@@ -376,7 +373,6 @@ func listARJ(path string) error {
 
 	mh := a.MainHeader()
 
-	// Primeira passada: coleta os headers e calcula a largura máxima do tamanho.
 	type entry struct {
 		hdr  *ARJHeader
 		date string
@@ -405,45 +401,66 @@ func listARJ(path string) error {
 		}
 	}
 
-	// Calcula a largura: número de dígitos do maior tamanho (mínimo 9).
 	sizeWidth := len(fmt.Sprintf("%d", maxSize))
 	if sizeWidth < 9 {
 		sizeWidth = 9
 	}
 
-	// Segunda passada: imprime com a largura calculada.
 	fmt.Printf("Archive: %s\n", path)
 	fmt.Printf("  Version: %d.%02d  Host OS: %d  Flags: 0x%02X\n",
 		mh.Version/10, mh.Version%10, mh.HostOS, mh.Flags)
 	fmt.Println()
 
-	// Cabeçalho alinhado
-	fmt.Printf("  %-*s  %-10s %-5s   %s\n",
-		sizeWidth, "Length", "Date", "Time", "Name")
-	fmt.Printf("  %s  %s %s   %s\n",
+	// Cabeçalho (5 colunas, 1 espaço entre Time e Mode, 1 entre Mode e Name)
+	fmt.Printf("  %-*s  %-10s %-5s %-10s %s\n",
+		sizeWidth, "Length", "Date", "Time", "Mode", "Name")
+	fmt.Printf("  %s  %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
 		strings.Repeat("-", 5),
+		strings.Repeat("-", 10),
 		"----")
 
 	for _, e := range entries {
-		fmt.Printf("  %*d  %-10s %-5s   %s\n",
-			sizeWidth, e.hdr.OriginalSize, e.date, e.time, e.hdr.Filename)
+		mode := formatFileMode(e.hdr.FileAccessMode)
+		fmt.Printf("  %*d  %-10s %-5s %-10s %s\n",
+			sizeWidth, e.hdr.OriginalSize, e.date, e.time, mode, e.hdr.Filename)
 	}
 
-	// Rodapé alinhado
-	fmt.Printf("  %s  %s %s   %s\n",
+	// Rodapé (mesmos espaços do cabeçalho)
+	fmt.Printf("  %s  %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
 		strings.Repeat("-", 5),
+		strings.Repeat("-", 10),
 		"-------")
-	fmt.Printf("  %*d  %s %s   %d files\n",
+	fmt.Printf("  %*d  %s %s %s %d files\n",
 		sizeWidth, total,
 		strings.Repeat(" ", 10),
 		strings.Repeat(" ", 5),
+		strings.Repeat(" ", 10),
 		len(entries))
 
 	return nil
+}
+
+// formatFileMode converte o file_mode (uint16) em uma string tipo "rwxr-xr-x".
+func formatFileMode(mode uint16) string {
+	if mode == 0 {
+		return "----------"
+	}
+	perms := mode & 0o777
+	var sb strings.Builder
+	if perms&0o400 != 0 { sb.WriteByte('r') } else { sb.WriteByte('-') }
+	if perms&0o200 != 0 { sb.WriteByte('w') } else { sb.WriteByte('-') }
+	if perms&0o100 != 0 { sb.WriteByte('x') } else { sb.WriteByte('-') }
+	if perms&0o040 != 0 { sb.WriteByte('r') } else { sb.WriteByte('-') }
+	if perms&0o020 != 0 { sb.WriteByte('w') } else { sb.WriteByte('-') }
+	if perms&0o010 != 0 { sb.WriteByte('x') } else { sb.WriteByte('-') }
+	if perms&0o004 != 0 { sb.WriteByte('r') } else { sb.WriteByte('-') }
+	if perms&0o002 != 0 { sb.WriteByte('w') } else { sb.WriteByte('-') }
+	if perms&0o001 != 0 { sb.WriteByte('x') } else { sb.WriteByte('-') }
+	return sb.String()
 }
 
 func dosTimestamp(ts uint32) (string, string) {
