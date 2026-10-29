@@ -26,16 +26,16 @@ Usage:     arj <command> [-<sw> [-<sw>...]] <archive_name> [<file_names>...]
 Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
 
 <Commands>
-  a: Add files to archive               l: List contents of archive
-  x: eXtract files with full pathname   t: Test integrity of archive
-  -h: Show this help                    -?: Same as -h
+  a: Add files to archive               d: Delete files from archive
+  l: List contents of archive           t: Test integrity of archive
+  x: eXtract files with full pathname   -h: Show this help
 
 <Switches>
   g: Garble with password (Kuznyechik)  y: assume Yes on all queries
 
 Notes:
   - Compression uses method 4 (LZ77/LZSS).
-  - Decompression accepts methods 0-4.
+  - Decompression accepts methods 0–4.
   - Encryption uses Kuznyechik (GOST R 34.12-2015).
   - CRC32 is kept for header compatibility.
 ```
