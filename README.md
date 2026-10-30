@@ -20,10 +20,11 @@ A modern, portable ARJ implementation in Go. Method 4 compression, method 0–4 
 
 ## Usage
 ``` 
-ARJ Evolved — The ARJ format, modernized with Kuznyechik encryption.
+ARJ Evolved — The ARJ format, with a modern encryption layer.
 
 Usage:     arj <command> [-<sw> [-<sw>...]] <archive_name> [<file_names>...]
 Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
+           arj a -v1440 archive.arj file1 file2
 
 <Commands>
   a: Add files to archive               d: Delete files from archive
@@ -32,11 +33,14 @@ Examples:  arj a -gsecret archive, arj x -gsecret archive, arj l archive
 
 <Switches>
   g: Garble with password (Kuznyechik)  y: assume Yes on all queries
+  v: create multi-Volume archive in KB  u: Update files (new and newer)
 
 Notes:
   - Compression uses method 4 (LZ77/LZSS).
   - Decompression accepts methods 0–4.
-  - Encryption uses Kuznyechik (GOST R 34.12-2015).
+  - Encryption uses Kuznyechik (GOST R 34.12-2015) in CFB Mode.
+  - Key derivation uses PBKDF2-Streebog-256 (GOST R 34.11-2012).
+  - Authentication uses HMAC-Streebog-256 (GOST R 34.11-2012).
   - CRC32 is kept for header compatibility.
 ```
 
