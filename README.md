@@ -14,8 +14,8 @@ A modern, portable ARJ implementation in Go. Method 4 compression, method 0–4 
 | Compression | Methods 0–4 | Method 4 (LZ77/LZSS) |
 | Decompression | Methods 0–4 | Methods 0–4 (kept) |
 | Encryption | GOST 28147-89 (obsolete) | Kuznyechik (GOST R 34.12-2015) in CFB mode |
-| Key derivation | Password + 8-byte modifier | PBKDF2-Streebog-256 (4096 iterations, random 16-byte salt) |
-| IV | 8-byte modifier (timestamp-derived) | Random 16-byte IV (`salt` for single-volume, `salt ^ resumePos` for multi-volume) |
+| Key derivation | Password + 8-byte modifier | PBKDF2-Streebog-256 (4096 iterations, random 4-byte salt) |
+| IV | 8-byte modifier (timestamp-derived) | Random 4-byte IV (`salt` for single-volume, `salt ^ resumePos` for multi-volume) |
 | Integrity | CRC32 | CRC32 (kept) + HMAC-Streebog-256 (per-file MAC) |
 | Multi-volume | Split compressed stream at volume boundary | Chunks of 32 KB, each self-contained (dictionary + bitstream restart) |
 | Platforms | DOS, Windows, Linux (inconsistent) | Linux, macOS, Windows (consistent) |
