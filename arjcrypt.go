@@ -11,20 +11,21 @@ type ARJCrypt struct {
 	lastBytes int
 }
 
-func (c *ARJCrypt) Init(password string, modifier [2]uint32) {
-	// Chave de 32 bytes (zero-padded)
-	key := make([]byte, 32)
-	copy(key, []byte(password))
+// Init initializes the cipher with a 32-byte encryption key and a
+// 4-byte IV (stored in the "reserved" field of the local header).
+//
+// The IV is no longer derived from the timestamp: it is a random
+// per-file value, so two files with the same timestamp but different
+// IVs produce different keystreams.
+//
+// The 4-byte IV is expanded to the 16-byte backCode via Streebog-256.
+func (c *ARJCrypt) Init(encKey []byte, iv uint32) {
+	c.block = newKuznyechikCipher(encKey)
 
-	// Cria o cifrador Kuznyechik (não retorna error)
-	c.block = newKuznyechikCipher(key)
+	ivBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(ivBytes, iv)
 
-	// IV de 16 bytes derivado do modifier via Streebog-256
-	modBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint32(modBytes[0:4], modifier[0])
-	binary.LittleEndian.PutUint32(modBytes[4:8], modifier[1])
-
-	hash := streebogSum256(modBytes)
+	hash := streebogSum256(ivBytes)
 	copy(c.backCode[:], hash[:16])
 
 	c.lastBytes = 0

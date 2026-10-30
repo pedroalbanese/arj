@@ -1,12 +1,9 @@
 package main
 
-// ===========================================================================
-// ARJ encoder — method 4 (encode_f) — port of encode.c
-// ===========================================================================
-
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 )
@@ -22,6 +19,12 @@ func dbg4(format string, a ...interface{}) {
 	if enc4Debug {
 		fmt.Fprintf(os.Stderr, format+"\n", a...)
 	}
+}
+
+type checkpoint struct {
+	compOffset int64
+	origOffset int64
+	crc32      uint32
 }
 
 type encState struct {
@@ -46,6 +49,10 @@ type encState struct {
 	in       []byte
 	inPos    int
 	origSize int
+
+	compWritten  int64
+	origConsumed int64
+	checkpoints  []checkpoint
 }
 
 func newEncState(out io.Writer, origSize int) *encState {
@@ -53,7 +60,7 @@ func newEncState(out io.Writer, origSize int) *encState {
 	e.dicbit = 14
 	e.numchars = 32
 	e.dicsizCur = 15800
-	e.treesize = 30720
+	e.treesize = 32768
 	if origSize < 16384 {
 		e.dicbit = 12
 	}
@@ -63,6 +70,7 @@ func newEncState(out io.Writer, origSize int) *encState {
 	e.dtree = make([]int16, e.treesize+16)
 	e.fpbuf = make([]int16, e.fpcount+4)
 	e.tcPasses = 0
+	e.checkpoints = make([]checkpoint, 0, 64)
 	return e
 }
 
@@ -122,6 +130,7 @@ func (e *encState) putbits(nC int, nX uint16) {
 func (e *encState) flushCompdata() {
 	if e.outPos > 0 {
 		e.out.Write(e.outBuf[:e.outPos])
+		e.compWritten += int64(e.outPos)
 		e.outPos = 0
 	}
 }
@@ -131,13 +140,32 @@ func (e *encState) initPutbits() {
 	e.bitbuf = 0
 	e.outPos = 0
 	e.outBuf = make([]byte, 512)
+	e.compWritten = 0
+	e.origConsumed = 0
+	e.checkpoints = e.checkpoints[:0]
 }
 
 func (e *encState) shutdownPutbits() {
-	e.putbits(7, 0)
+	pad := (8 - e.bitcount%8) % 8
+	if pad > 0 {
+		e.putbits(pad, 0)
+	}
 	if e.outPos != 0 {
 		e.flushCompdata()
 	}
+}
+
+func (e *encState) flushCheckpoint() {
+	if e.bitcount != 0 {
+		return
+	}
+	if e.outPos != 0 {
+		e.flushCompdata()
+	}
+	e.checkpoints = append(e.checkpoints, checkpoint{
+		compOffset: e.compWritten,
+		origOffset: e.origConsumed,
+	})
 }
 
 func (e *encState) fillFpbuf() {
@@ -146,8 +174,6 @@ func (e *encState) fillFpbuf() {
 	}
 }
 
-// updTree finds the longest match at position nC in the window.
-// Mirrors upd_tree() from encode.c (non-ASM path).
 func (e *encState) updTree(nC int) int {
 	dptr := e.dtree
 	rBx := int(dptr[nC])
@@ -181,24 +207,16 @@ func (e *encState) updTree(nC int) int {
 		c         int
 	)
 
-	// First iteration: compare the initial rBx.
 	goto utLoop
 
 utFetch:
-	if enc4Debug {
-		dbg4("utFetch: tptr=%d tdptr=%d rBp=%d rBx=%d rDx=%d", tptr, tdptr, rBp, rBx, rDx)
-	}
 	v, ok = safeTreeU16(e.tree, tptr+rBp-1)
 	if !ok {
 		goto updFinish
 	}
 	rAx = v
 
-	// select_pos
 	tdptr = rBp
-	if enc4Debug {
-		dbg4("select_pos: start tdptr=%d rBp=%d rBx=%d", tdptr, rBp, rBx)
-	}
 	for {
 		rDx--
 		if rDx < 0 {
@@ -211,10 +229,6 @@ utFetch:
 		if rBx+tdptr-1 < 0 || rBx+tdptr-1+2 > len(e.tree) {
 			goto updFinish
 		}
-		if enc4Debug {
-			dbg4("select_pos: rBx=%d tdptr=%d cmp rAx=%04X with tree[%d]=%04X",
-				rBx, tdptr, rAx, tdptr+rBx-1, treeU16(e.tree, tdptr+rBx-1))
-		}
 		if rAx == treeU16(e.tree, tdptr+rBx-1) {
 			break
 		}
@@ -226,23 +240,12 @@ utFetch:
 	if tdptr >= tptr {
 		goto utFetch
 	}
-	if enc4Debug {
-		dbg4("select_pos: matched rBx=%d new tdptr=%d", rBx, tdptr)
-	}
 
 utLoop:
-	if enc4Debug {
-		dbg4("utLoop-cmp: tptr=%d tdptr=%d v1=%04X v2=%04X rBp=%d rBx=%d",
-			tptr, tdptr,
-			treeU16(e.tree, tptr),
-			treeU16(e.tree, tdptr),
-			rBp, rBx)
-	}
 	if treeU16(e.tree, tptr) != treeU16(e.tree, tdptr) {
 		goto selectPos
 	}
 
-	// calc
 	prevTptr = tptr
 	prevTdptr = tdptr
 	tptr += 2
@@ -269,9 +272,6 @@ utLoop:
 	}
 	tptr = prevTptr
 	tdptr = prevTdptr
-	if enc4Debug {
-		dbg4("calc: remainder=%d rBp=%d tptr=%d tdptr=%d", remainder, rBp, tptr, tdptr)
-	}
 	if tptr <= tdptr {
 		goto updFinish
 	}
@@ -289,9 +289,6 @@ utLoop:
 	goto utFetch
 
 selectPos:
-	if enc4Debug {
-		dbg4("selectPos: tptr=%d tdptr=%d rBp=%d rBx=%d rDx=%d", tptr, tdptr, rBp, rBx, rDx)
-	}
 	for {
 		rDx--
 		if rDx < 0 {
@@ -303,10 +300,6 @@ selectPos:
 		}
 		if rBx+tdptr-1 < 0 || rBx+tdptr-1+2 > len(e.tree) {
 			goto updFinish
-		}
-		if enc4Debug {
-			dbg4("selectPos: rBx=%d tdptr=%d cmp rAx=%04X with tree[%d]=%04X",
-				rBx, tdptr, rAx, tdptr+rBx-1, treeU16(e.tree, tdptr+rBx-1))
 		}
 		if rAx == treeU16(e.tree, tdptr+rBx-1) {
 			break
@@ -326,9 +319,6 @@ updFinish:
 		rBp = 256
 	}
 	e.tcPasses = rBp
-	if enc4Debug {
-		dbg4("updFinish: rBp=%d dicpos=%d", rBp, e.dicpos)
-	}
 	return e.tcPasses
 }
 
@@ -369,9 +359,19 @@ func (e *encState) enc4Pass2(nC int) {
 	e.putbits(rCx, uint16(nC))
 }
 
-// encodeF is the main method-4 compressor.
-// Mirrors encode_f() from encode.c.
-func (e *encState) encodeF() error {
+// encodeF compresses e.in into e.out.
+//
+// For single-volume (multiVolume == false), the whole file is
+// compressed as one continuous bit stream. shutdownPutbits is called
+// only at the very end. This is what decodeF expects for a single
+// entry, so the decompressed output matches the original.
+//
+// For multi-volume (multiVolume == true), the input is processed in
+// chunks of e.treesize (32 KB). Each chunk restarts the LZ77
+// dictionary and ends with shutdownPutbits, so every chunk is
+// self-contained and can be placed in its own volume. A checkpoint
+// with the chunk's CRC32 is recorded at the start of each chunk.
+func (e *encState) encodeF(multiVolume bool) error {
 	e.initPutbits()
 	e.dicpos = 0
 	e.tcPasses = 0
@@ -383,6 +383,10 @@ func (e *encState) encodeF() error {
 		if len(e.in)-e.inPos < fetch {
 			fetch = len(e.in) - e.inPos
 		}
+
+		e.flushCheckpoint()
+		chunkCRC := crc32.ChecksumIEEE(e.in[e.inPos : e.inPos+fetch])
+
 		copy(e.tree, e.in[e.inPos:e.inPos+fetch])
 		e.inPos += fetch
 
@@ -390,6 +394,9 @@ func (e *encState) encodeF() error {
 		for i := fetch; i < e.treesize; i++ {
 			e.dtree[i] = -1
 		}
+
+		e.dicpos = 0
+		e.tcPasses = 0
 
 		rDx := uint16(e.tree[0])
 		rCx := uint16(e.fpMax&0xFF00) | uint16(hashBits&0xFF)
@@ -414,36 +421,71 @@ func (e *encState) encodeF() error {
 			if m < 0 || m >= len(e.tree) {
 				panic(fmt.Sprintf("encodeF: m=%d i=%d fetch=%d tcPasses=%d", m, i, fetch, e.tcPasses))
 			}
+
 			rAx := e.updTree(m)
 			if rAx > i {
 				rAx = i
 				e.tcPasses = i
 			}
-			if enc4Debug {
-				if rAx < ENC4_THRESHOLD {
-					dbg4("ENC: LIT %02X (m=%d i=%d)", e.tree[m], m, i)
-				} else {
-					dbg4("ENC: MATCH len=%d dicpos=%d (m=%d i=%d)", e.tcPasses, e.dicpos, m, i)
-				}
-			}
 			if rAx < ENC4_THRESHOLD {
 				e.putbits(9, uint16(e.tree[m]))
 				i--
 				m++
+				e.origConsumed++
 			} else {
 				if e.tcPasses <= 0 || e.tcPasses > i {
 					e.putbits(9, uint16(e.tree[m]))
 					i--
 					m++
+					e.origConsumed++
 					continue
 				}
 				i -= e.tcPasses
 				m += e.tcPasses
+				e.origConsumed += int64(e.tcPasses)
 				e.enc4Pass1(e.tcPasses - 2)
 				e.enc4Pass2(e.dicpos)
 			}
 		}
+
+		// Multi-volume: finish this chunk on a byte boundary so
+		// the next chunk starts clean. Single-volume: keep the
+		// stream continuous.
+		if multiVolume {
+			e.shutdownPutbits()
+		}
+
+		last := len(e.checkpoints) - 1
+		e.checkpoints[last].crc32 = chunkCRC
 	}
-	e.shutdownPutbits()
+
+	if !multiVolume {
+		e.shutdownPutbits()
+	}
+
+	e.checkpoints = append(e.checkpoints, checkpoint{
+		compOffset: e.compWritten,
+		origOffset: e.origConsumed,
+		crc32:      0,
+	})
 	return nil
+}
+
+func (e *encState) resumePositionFor(target int64) uint32 {
+	if len(e.checkpoints) == 0 {
+		return 0
+	}
+	lo, hi := 0, len(e.checkpoints)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if e.checkpoints[mid].compOffset <= target {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo == 0 {
+		return uint32(e.checkpoints[0].origOffset)
+	}
+	return uint32(e.checkpoints[lo-1].origOffset)
 }

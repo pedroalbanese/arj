@@ -1,17 +1,15 @@
 package main
 
 import (
+	"crypto/hmac"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
-
-// ===========================================================================
-// Constants from defines.h
-// ===========================================================================
 
 const (
 	HEADER_ID        = 0xEA60
@@ -49,10 +47,6 @@ const (
 	MAXMETHOD = 4
 )
 
-// ===========================================================================
-// Parsed header
-// ===========================================================================
-
 type ARJHeader struct {
 	HeaderID        uint16
 	BasicHeaderSize uint16
@@ -82,25 +76,58 @@ type ARJHeader struct {
 	ATime          uint32
 	CTime          uint32
 
+	IV uint32
+
 	Filename    string
 	Comment     string
 	ExtendedHdr []byte
 
+	RawBasicHdr []byte
+
 	DataOffset int64
+
+	ContinuedPrev bool
+	ContinuedNext bool
 }
 
 func (h *ARJHeader) HasFlag(f uint8) bool { return h.Flags&f != 0 }
 func (h *ARJHeader) IsMain() bool        { return h.FileType == ARJT_COMMENT && h.Filename == "" }
 
-// ===========================================================================
-// ARJArchive
-// ===========================================================================
-
 type ARJArchive struct {
-	f        *os.File
-	pos      int64
-	mainHdr  *ARJHeader
-	Password string
+    f        *os.File
+    pos      int64
+    mainHdr  *ARJHeader
+    Password string
+
+    basePath    string
+    curVolNum   int
+    multiVolume bool
+
+    // Cache of derived keys, keyed by salt.
+    keyCache map[uint32][2][]byte
+}
+
+func (a *ARJArchive) getKeys(salt uint32) (encKey, macKey []byte) {
+    if a.keyCache == nil {
+        a.keyCache = make(map[uint32][2][]byte)
+    }
+    if k, ok := a.keyCache[salt]; ok {
+        return k[0], k[1]
+    }
+    encKey, macKey = deriveKeys(a.Password, salt)
+    a.keyCache[salt] = [2][]byte{encKey, macKey}
+    return encKey, macKey
+}
+
+func volumePath(basePath string, n int) string {
+	if n == 0 {
+		return basePath
+	}
+	dir := filepath.Dir(basePath)
+	base := filepath.Base(basePath)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return filepath.Join(dir, fmt.Sprintf("%s.a%02d", stem, n))
 }
 
 func OpenARJ(path string) (*ARJArchive, error) {
@@ -108,7 +135,7 @@ func OpenARJ(path string) (*ARJArchive, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &ARJArchive{f: f}
+	a := &ARJArchive{f: f, basePath: path, curVolNum: 0}
 	hdr, err := a.readHeader(true)
 	if err != nil {
 		f.Close()
@@ -119,6 +146,7 @@ func OpenARJ(path string) (*ARJArchive, error) {
 		return nil, fmt.Errorf("arj: empty archive")
 	}
 	a.mainHdr = hdr
+	a.multiVolume = hdr.HasFlag(VOLUME_FLAG)
 	return a, nil
 }
 
@@ -126,7 +154,47 @@ func (a *ARJArchive) Close() error           { return a.f.Close() }
 func (a *ARJArchive) MainHeader() *ARJHeader { return a.mainHdr }
 
 func (a *ARJArchive) Next() (*ARJHeader, error) {
-	return a.readHeader(false)
+	for {
+		hdr, err := a.readHeader(false)
+		if err != nil {
+			return nil, err
+		}
+		if hdr != nil {
+			return hdr, nil
+		}
+		if !a.multiVolume {
+			return nil, nil
+		}
+		nextPath := volumePath(a.basePath, a.curVolNum+1)
+		if _, statErr := os.Stat(nextPath); statErr != nil {
+			return nil, nil
+		}
+		if err := a.openNextVolume(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (a *ARJArchive) openNextVolume() error {
+	next := a.curVolNum + 1
+	path := volumePath(a.basePath, next)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot open volume %s: %w", path, err)
+	}
+	a.f.Close()
+	a.f = f
+	a.curVolNum = next
+	a.pos = 0
+
+	mhdr, err := a.readHeader(true)
+	if err != nil {
+		return err
+	}
+	if mhdr == nil {
+		return fmt.Errorf("empty volume %s", path)
+	}
+	return nil
 }
 
 func (a *ARJArchive) SkipData(hdr *ARJHeader) error {
@@ -202,6 +270,7 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 		CRC32:           binary.LittleEndian.Uint32(basicHdr[20:24]),
 		EntryPos:        binary.LittleEndian.Uint16(basicHdr[24:26]),
 		FileAccessMode:  binary.LittleEndian.Uint16(basicHdr[26:28]),
+		RawBasicHdr:     append([]byte{}, basicHdr...),
 	}
 
 	pos := 28
@@ -221,24 +290,30 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 			pos += 4
 		}
 	} else {
-		if hdr.FirstHdrSize < R9_HDR_SIZE {
-			if hdr.HasFlag(EXTFILE_FLAG) && pos+4 <= len(basicHdr) {
-				hdr.ResumePosition = binary.LittleEndian.Uint32(basicHdr[pos:])
-				pos += 4
-			}
-		} else {
-			if pos+16 <= len(basicHdr) {
-				hdr.ResumePosition = binary.LittleEndian.Uint32(basicHdr[pos:])
-				hdr.ATime = binary.LittleEndian.Uint32(basicHdr[pos+4:])
-				hdr.CTime = binary.LittleEndian.Uint32(basicHdr[pos+8:])
-				pos += 16
+		resumeOff := 28
+		if hdr.FirstHdrSize >= FIRST_HDR_SIZE_V {
+			resumeOff = 30
+		}
+		if resumeOff+4 <= len(basicHdr) {
+			hdr.ResumePosition = binary.LittleEndian.Uint32(basicHdr[resumeOff : resumeOff+4])
+		}
+
+		if hdr.FirstHdrSize >= R9_HDR_SIZE {
+			if resumeOff+16 <= len(basicHdr) {
+				hdr.ATime = binary.LittleEndian.Uint32(basicHdr[resumeOff+4:])
+				hdr.CTime = binary.LittleEndian.Uint32(basicHdr[resumeOff+8:])
 			}
 		}
+
+		ivOff := resumeOff + 12
+		if ivOff+4 <= len(basicHdr) {
+			hdr.IV = binary.LittleEndian.Uint32(basicHdr[ivOff : ivOff+4])
+		}
+
+		hdr.ContinuedPrev = hdr.HasFlag(EXTFILE_FLAG)
+		hdr.ContinuedNext = hdr.HasFlag(VOLUME_FLAG)
 	}
 
-	// The filename starts at the first_hdr_size offset of the local header.
-	// The basicHdr starts at offset 0x04 of the file, so the filename is at
-	// basicHdr[first_hdr_size - 4].
 	nameStart := int(hdr.FirstHdrSize)
 	if nameStart < 0 || nameStart >= len(basicHdr) {
 		return nil, fmt.Errorf("invalid FirstHdrSize: %d (basicHdr len=%d)",
@@ -315,9 +390,26 @@ func (a *ARJArchive) readExtendedHeaders() ([]byte, error) {
 	}
 }
 
-// ===========================================================================
-// Extraction
-// ===========================================================================
+func extractMacTag(ext []byte) []byte {
+	i := 0
+	for i+2 <= len(ext) {
+		size := int(binary.LittleEndian.Uint16(ext[i:]))
+		if size == 0 {
+			return nil
+		}
+		if i+2+size+4 > len(ext) {
+			return nil
+		}
+		block := ext[i+2 : i+2+size]
+		if size >= 2 && block[0] == extHdrID_MAC {
+			tag := make([]byte, macTagLen)
+			copy(tag, block[2:])
+			return tag
+		}
+		i += 2 + size + 4
+	}
+	return nil
+}
 
 func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 	if hdr.CompressedSize == 0 {
@@ -334,10 +426,42 @@ func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 		if a.Password == "" {
 			return fmt.Errorf("encrypted file; use -gPASSWORD")
 		}
-		modifier := buildModifier(hdr.Timestamp, hdr.PasswordMod)
+
+		// Salt is stored in basicHdr[34:38] (the ATime field).
+		var salt uint32
+		if len(hdr.RawBasicHdr) >= 38 {
+			salt = binary.LittleEndian.Uint32(hdr.RawBasicHdr[34:38])
+		}
+		iv := salt ^ hdr.ResumePosition
+		encKey, macKey := a.getKeys(salt)
+
+		tag := extractMacTag(hdr.ExtendedHdr)
+		if tag == nil {
+			return fmt.Errorf("missing MAC tag; file may be corrupted or tampered")
+		}
+
+		// Reconstruct the header exactly as writeVolumes did before MAC.
+		hdrForMAC := append([]byte{}, hdr.RawBasicHdr...)
+		binary.LittleEndian.PutUint32(hdrForMAC[20:24], hdr.CRC32)
+		binary.LittleEndian.PutUint32(hdrForMAC[30:34], hdr.ResumePosition)
+		binary.LittleEndian.PutUint32(hdrForMAC[34:38], salt)
+
+		expected := hmacStreebog256(macKey, append(hdrForMAC, compressed...))
+		if !hmac.Equal(tag, expected) {
+			return fmt.Errorf("MAC verification failed; file was tampered with")
+		}
+
 		cipher := &ARJCrypt{}
-		cipher.Init(a.Password, modifier)
+		cipher.Init(encKey, iv)
 		cipher.Decode(compressed)
+	}
+
+	if hdr.ResumePosition != 0 {
+		if seeker, ok := out.(io.Seeker); ok {
+			if _, err := seeker.Seek(int64(hdr.ResumePosition), io.SeekStart); err != nil {
+				return err
+			}
+		}
 	}
 
 	extract := func(data []byte, _ int) bool {
@@ -360,10 +484,6 @@ func (a *ARJArchive) ExtractFile(hdr *ARJHeader, out io.Writer) error {
 	}
 }
 
-// ===========================================================================
-// Listing
-// ===========================================================================
-
 func listARJ(path string) error {
 	a, err := OpenARJ(path)
 	if err != nil {
@@ -375,12 +495,28 @@ func listARJ(path string) error {
 
 	type entry struct {
 		hdr  *ARJHeader
+		size uint64
 		date string
 		time string
 	}
 	var entries []entry
 	var maxSize uint64
 	var total uint64
+
+	// current is the entry being accumulated across chunks.
+	var current *entry
+
+	flushCurrent := func() {
+		if current == nil {
+			return
+		}
+		entries = append(entries, *current)
+		if current.size > maxSize {
+			maxSize = current.size
+		}
+		total += current.size
+		current = nil
+	}
 
 	for {
 		hdr, err := a.Next()
@@ -390,16 +526,34 @@ func listARJ(path string) error {
 		if hdr == nil {
 			break
 		}
-		date, timeStr := dosTimestamp(hdr.Timestamp)
-		entries = append(entries, entry{hdr: hdr, date: date, time: timeStr})
-		if uint64(hdr.OriginalSize) > maxSize {
-			maxSize = uint64(hdr.OriginalSize)
+
+		// Skip directory entries and non-file entries in the listing?
+		// Keep them but do not merge.
+		isContinuation := hdr.HasFlag(EXTFILE_FLAG) && current != nil && hdr.Filename == current.hdr.Filename
+
+		if !isContinuation {
+			flushCurrent()
+			date, timeStr := dosTimestamp(hdr.Timestamp)
+			current = &entry{
+				hdr:  hdr,
+				size: uint64(hdr.OriginalSize),
+				date: date,
+				time: timeStr,
+			}
+		} else {
+			// Accumulate the chunk's OriginalSize.
+			current.size += uint64(hdr.OriginalSize)
 		}
-		total += uint64(hdr.OriginalSize)
+
+		if !hdr.HasFlag(VOLUME_FLAG) {
+			flushCurrent()
+		}
+
 		if err := a.SkipData(hdr); err != nil {
 			return err
 		}
 	}
+	flushCurrent()
 
 	sizeWidth := len(fmt.Sprintf("%d", maxSize))
 	if sizeWidth < 9 {
@@ -411,7 +565,6 @@ func listARJ(path string) error {
 		mh.Version/10, mh.Version%10, mh.HostOS, mh.Flags)
 	fmt.Println()
 
-	// Header (5 columns, 1 space between Time and Mode, 1 between Mode and Name)
 	fmt.Printf("  %-*s  %-10s %-5s %-10s %s\n",
 		sizeWidth, "Length", "Date", "Time", "Mode", "Name")
 	fmt.Printf("  %s  %s %s %s %s\n",
@@ -424,10 +577,9 @@ func listARJ(path string) error {
 	for _, e := range entries {
 		mode := formatFileMode(e.hdr.FileAccessMode)
 		fmt.Printf("  %*d  %-10s %-5s %-10s %s\n",
-			sizeWidth, e.hdr.OriginalSize, e.date, e.time, mode, e.hdr.Filename)
+			sizeWidth, e.size, e.date, e.time, mode, e.hdr.Filename)
 	}
 
-	// Footer (same spacing as the header)
 	fmt.Printf("  %s  %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
@@ -444,7 +596,6 @@ func listARJ(path string) error {
 	return nil
 }
 
-// formatFileMode converts the file_mode (uint16) into a string like "rwxr-xr-x".
 func formatFileMode(mode uint16) string {
 	if mode == 0 {
 		return "----------"
