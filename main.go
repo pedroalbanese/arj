@@ -325,22 +325,68 @@ func addARJ(archivePath string, files []string, password string,
 				break
 			}
 
+			// copyExistingEntry reads the current entry's raw bytes
+			// from the archive and appends it to `entries`, so it is
+			// preserved in the rewritten archive.
+			copyExistingEntry := func() error {
+				headerStart := hdr.DataOffset - int64(hdr.BasicHeaderSize) - 10 - int64(len(hdr.ExtendedHdr))
+				totalSize := int64(hdr.BasicHeaderSize) + 10 + int64(len(hdr.ExtendedHdr)) + int64(hdr.CompressedSize)
+				buf := make([]byte, totalSize)
+				if _, err := a.f.ReadAt(buf, headerStart); err != nil {
+					return err
+				}
+				basicHdr := append([]byte{}, buf[4:4+int(hdr.BasicHeaderSize)]...)
+				comp := append([]byte{}, buf[int64(hdr.BasicHeaderSize)+10+int64(len(hdr.ExtendedHdr)):]...)
+
+				var existingSalt uint32
+				if len(basicHdr) >= 38 {
+					existingSalt = binary.LittleEndian.Uint32(basicHdr[34:38])
+				}
+
+				e := rawEntry{
+					name:     hdr.Filename,
+					baseHdr:  basicHdr,
+					comp:     comp,
+					salt:     existingSalt,
+					dosTS:    hdr.Timestamp,
+					origSize: hdr.OriginalSize,
+					fileCRC:  hdr.CRC32,
+					fileMode: hdr.FileAccessMode,
+				}
+				entries = insertSorted(entries, e)
+
+				if _, err := a.f.Seek(int64(hdr.CompressedSize), io.SeekCurrent); err != nil {
+					return err
+				}
+				a.pos += int64(hdr.CompressedSize)
+				return nil
+			}
+
 			if newNames[hdr.Filename] {
+				// Update mode: only replace if the file on disk is
+				// newer than the one in the archive (timestamp or CRC).
 				if updateOnly {
 					diskInfo, statErr := os.Stat(hdr.Filename)
 					if statErr == nil {
 						diskTime := dosTimestampFromTime(diskInfo.ModTime())
-						if diskTime <= hdr.Timestamp {
+						diskData, readErr := os.ReadFile(hdr.Filename)
+						sameContent := false
+						if readErr == nil {
+							sameContent = crc32.ChecksumIEEE(diskData) == hdr.CRC32
+						}
+						if diskTime <= hdr.Timestamp && sameContent {
 							skipNew[hdr.Filename] = true
 							fmt.Printf("  keeping (up to date): %s\n", hdr.Filename)
-							if err := a.SkipData(hdr); err != nil {
+							if err := copyExistingEntry(); err != nil {
 								return err
 							}
 							continue
 						}
 					}
 				}
-				if promptYes(fmt.Sprintf("%s is already in the archive. Overwrite?", hdr.Filename), assumeYes) {
+				// With -u, replace automatically (no prompt). Without
+				// -u, ask.
+				if updateOnly || promptYes(fmt.Sprintf("%s is already in the archive. Overwrite?", hdr.Filename), assumeYes) {
 					if err := a.SkipData(hdr); err != nil {
 						return err
 					}
@@ -349,40 +395,16 @@ func addARJ(archivePath string, files []string, password string,
 				}
 				skipNew[hdr.Filename] = true
 				fmt.Printf("  keeping:   %s\n", hdr.Filename)
+				if err := copyExistingEntry(); err != nil {
+					return err
+				}
+				continue
 			}
 
-			headerStart := hdr.DataOffset - int64(hdr.BasicHeaderSize) - 10 - int64(len(hdr.ExtendedHdr))
-			totalSize := int64(hdr.BasicHeaderSize) + 10 + int64(len(hdr.ExtendedHdr)) + int64(hdr.CompressedSize)
-			buf := make([]byte, totalSize)
-			if _, err := a.f.ReadAt(buf, headerStart); err != nil {
+			// File is not in the new set: keep the existing entry.
+			if err := copyExistingEntry(); err != nil {
 				return err
 			}
-
-			basicHdr := append([]byte{}, buf[4:4+int(hdr.BasicHeaderSize)]...)
-			comp := append([]byte{}, buf[int64(hdr.BasicHeaderSize)+10+int64(len(hdr.ExtendedHdr)):]...)
-
-			// Preserve the existing salt so the MAC stays valid.
-			var existingSalt uint32
-			if len(basicHdr) >= 38 {
-				existingSalt = binary.LittleEndian.Uint32(basicHdr[34:38])
-			}
-
-			e := rawEntry{
-				name:     hdr.Filename,
-				baseHdr:  basicHdr,
-				comp:     comp,
-				salt:     existingSalt,
-				dosTS:    hdr.Timestamp,
-				origSize: hdr.OriginalSize,
-				fileCRC:  hdr.CRC32,
-				fileMode: hdr.FileAccessMode,
-			}
-			entries = insertSorted(entries, e)
-
-			if _, err := a.f.Seek(int64(hdr.CompressedSize), io.SeekCurrent); err != nil {
-				return err
-			}
-			a.pos += int64(hdr.CompressedSize)
 		}
 	}
 
