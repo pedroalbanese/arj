@@ -175,15 +175,21 @@ func testARJ(path string, password string) error {
 		if current == nil {
 			return
 		}
-		total++
-		// The CRC32 in the *last* chunk's header covers the whole
-		// file. current.hdr is the first chunk, so use lastHdr.CRC32.
-		if crc32.ChecksumIEEE(current.data) == current.lastHdr.CRC32 {
+		// total was already incremented when the file started.
+		if current.lastHdr != nil &&
+			crc32.ChecksumIEEE(current.data) == current.lastHdr.CRC32 {
 			fmt.Printf("  %s: OK\n", current.hdr.Filename)
 			ok++
 		} else {
-			fmt.Printf("  %s: CRC MISMATCH (got %d bytes, want %d)\n",
-				current.hdr.Filename, len(current.data), current.hdr.OriginalSize)
+			want := uint32(0)
+			if current.lastHdr != nil {
+				want = current.lastHdr.CRC32
+			}
+			fmt.Printf("  %s: CRC MISMATCH (got 0x%08X, want 0x%08X, %d bytes)\n",
+				current.hdr.Filename,
+				crc32.ChecksumIEEE(current.data),
+				want,
+				len(current.data))
 		}
 		current = nil
 	}
@@ -211,6 +217,7 @@ func testARJ(path string, password string) error {
 		if !isContinuation {
 			flushCurrent()
 			current = &pendingFile{hdr: hdr}
+			total++ // count the attempt once per file
 		}
 		current.lastHdr = hdr
 
@@ -218,6 +225,8 @@ func testARJ(path string, password string) error {
 		buf.Write(current.data)
 		w := &resizeOnSeek{buf: &buf, pos: int64(buf.Len())}
 		if err := a.ExtractFile(hdr, w); err != nil {
+			// Do NOT increment ok. total already counted the file.
+			// Do NOT call flushCurrent (it would double count).
 			fmt.Printf("  %s: ERROR: %v\n", hdr.Filename, err)
 			current = nil
 			continue
@@ -281,4 +290,3 @@ func (w *sliceWriter) Write(b []byte) (int, error) {
 	*w.p = append(*w.p, b...)
 	return len(b), nil
 }
-
