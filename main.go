@@ -301,6 +301,7 @@ func addARJ(archivePath string, files []string, password string,
 	var entries []rawEntry
 	skipNew := make(map[string]bool)
 
+	var created time.Time
 	archiveExists := false
 	if _, err := os.Stat(archivePath); err == nil {
 		archiveExists = true
@@ -315,6 +316,13 @@ func addARJ(archivePath string, files []string, password string,
 			return err
 		}
 		defer a.Close()
+
+		mh := a.MainHeader()
+		if mh.HostOS == 0 {
+			created = dosTimestampToTime(mh.Timestamp)
+		} else {
+			created = time.Unix(int64(mh.Timestamp), 0)
+		}
 
 		for {
 			hdr, err := a.Next()
@@ -368,7 +376,12 @@ func addARJ(archivePath string, files []string, password string,
 				if updateOnly {
 					diskInfo, statErr := os.Stat(hdr.Filename)
 					if statErr == nil {
-						diskTime := dosTimestampFromTime(diskInfo.ModTime())
+						var diskTime uint32
+						if hdr.HostOS == 0 {
+							diskTime = dosTimestampFromTime(diskInfo.ModTime())
+						} else {
+							diskTime = uint32(diskInfo.ModTime().Unix())
+						}
 						diskData, readErr := os.ReadFile(hdr.Filename)
 						sameContent := false
 						if readErr == nil {
@@ -408,6 +421,23 @@ func addARJ(archivePath string, files []string, password string,
 		}
 	}
 
+	// Decide BEFORE building entries: is there anything new or changed?
+	// If -u and nothing needs updating, do not rewrite the archive at
+	// all. Rewriting would change the main header's modified timestamp
+	// and make the file look updated even when nothing was.
+	anyNew := false
+	for _, in := range inputs {
+		if !skipNew[in.name] {
+			anyNew = true
+			break
+		}
+	}
+
+	if updateOnly && !anyNew {
+		fmt.Println("  no changes")
+		return nil
+	}
+
 	for _, in := range inputs {
 		if skipNew[in.name] {
 			continue
@@ -426,8 +456,13 @@ func addARJ(archivePath string, files []string, password string,
 		fmt.Printf("  adding: %s (%d bytes)%s\n", in.name, in.info.Size(), mark)
 	}
 
+	if created.IsZero() {
+		created = time.Now()
+	}
+	modified := time.Now()
+
 	if volumeLimitKB > 0 {
-		return writeVolumes(archivePath, entries, password, volumeLimitKB)
+		return writeVolumes(archivePath, entries, password, volumeLimitKB, created, modified)
 	}
 
 	tmpPath := archivePath + ".tmp"
@@ -437,7 +472,7 @@ func addARJ(archivePath string, files []string, password string,
 	}
 	defer tmp.Close()
 
-	if err := writeMainHeader(tmp, archivePath, password, false, true, false); err != nil {
+	if err := writeMainHeader(tmp, archivePath, password, false, true, false, created, modified); err != nil {
 		return fmt.Errorf("main header: %w", err)
 	}
 	for _, e := range entries {
@@ -519,7 +554,7 @@ func assembleHdr(hdr []byte, ext []byte) []byte {
 }
 
 func writeVolumes(archivePath string, raws []rawEntry, password string,
-	volumeLimitKB int) error {
+	volumeLimitKB int, created, modified time.Time) error {
 
 	limit := int64(volumeLimitKB) * 1024
 
@@ -553,7 +588,7 @@ func writeVolumes(archivePath string, raws []rawEntry, password string,
 
 	var mhBuf bytes.Buffer
 	hasNext := numVolumes > 1
-	if err := writeMainHeader(&mhBuf, path, password, true, true, hasNext); err != nil {
+	if err := writeMainHeader(&mhBuf, path, password, true, true, hasNext, created, modified); err != nil {
 		cur.Close()
 		return fmt.Errorf("main header: %w", err)
 	}
@@ -582,7 +617,7 @@ func writeVolumes(archivePath string, raws []rawEntry, password string,
 		fmt.Printf("Creating archive  : %s\n", filepath.Base(path))
 		nextHasNext := volNum < numVolumes-1
 		var mh2 bytes.Buffer
-		if err := writeMainHeader(&mh2, path, password, true, false, nextHasNext); err != nil {
+		if err := writeMainHeader(&mh2, path, password, true, false, nextHasNext, created, modified); err != nil {
 			return err
 		}
 		if _, err := cur.Write(mh2.Bytes()); err != nil {
@@ -750,6 +785,17 @@ func deleteARJ(archivePath string, patterns []string) error {
 	}
 	defer a.Close()
 
+	mh := a.MainHeader()
+	var created time.Time
+	if mh.HostOS == 0 {
+		created = dosTimestampToTime(mh.Timestamp)
+	} else {
+		created = time.Unix(int64(mh.Timestamp), 0)
+	}
+	if created.IsZero() {
+		created = time.Now()
+	}
+
 	tmpPath := archivePath + ".tmp"
 	tmp, err := os.Create(tmpPath)
 	if err != nil {
@@ -757,7 +803,7 @@ func deleteARJ(archivePath string, patterns []string) error {
 	}
 	defer tmp.Close()
 
-	if err := writeMainHeader(tmp, archivePath, "", false, true, false); err != nil {
+	if err := writeMainHeader(tmp, archivePath, "", false, true, false, created, time.Now()); err != nil {
 		return fmt.Errorf("main header: %w", err)
 	}
 
@@ -834,12 +880,13 @@ func copyFileEntry(a *ARJArchive, out io.Writer, hdr *ARJHeader) error {
 }
 
 func writeMainHeader(w io.Writer, archiveName string, password string,
-	multiVolume bool, isFirstVolume bool, hasNextVolume bool) error {
+	multiVolume bool, isFirstVolume bool, hasNextVolume bool,
+	created time.Time, modified time.Time) error {
 	hdr := make([]byte, 0, 64)
 	hdr = append(hdr, 34)
 	hdr = append(hdr, 11)
 	hdr = append(hdr, 1)
-	hdr = append(hdr, 2)
+	hdr = append(hdr, 2) // HostOS = 2 (UNIX, epoch timestamps)
 
 	var flags byte
 	if password != "" {
@@ -859,7 +906,7 @@ func writeMainHeader(w io.Writer, archiveName string, password string,
 	hdr = append(hdr, 0)
 
 	var ts [4]byte
-	binary.LittleEndian.PutUint32(ts[:], dosTimestampFromTime(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)))
+	binary.LittleEndian.PutUint32(ts[:], uint32(created.Unix()))
 	hdr = append(hdr, ts[:]...)
 
 	for i := 0; i < 12; i++ {
@@ -870,6 +917,8 @@ func writeMainHeader(w io.Writer, archiveName string, password string,
 	hdr = append(hdr, 0, 0)
 	hdr = append(hdr, 0, 0)
 	hdr = append(hdr, 0, 0)
+
+	binary.LittleEndian.PutUint32(hdr[30:34], uint32(modified.Unix()))
 
 	base := filepath.Base(archiveName)
 	hdr = append(hdr, []byte(base)...)
@@ -968,7 +1017,7 @@ func buildOneEntry(name, path string, info os.FileInfo, password string, multiVo
 	hdr = append(hdr, 46)
 	hdr = append(hdr, 11)
 	hdr = append(hdr, 1)
-	hdr = append(hdr, 2)
+	hdr = append(hdr, 2) // HostOS = 2 (UNIX, epoch timestamps)
 	var f byte
 	if password != "" {
 		f |= 0x11
@@ -979,7 +1028,7 @@ func buildOneEntry(name, path string, info os.FileInfo, password string, multiVo
 	hdr = append(hdr, ARJ_PMOD)
 
 	var ts [4]byte
-	binary.LittleEndian.PutUint32(ts[:], dosTS)
+	binary.LittleEndian.PutUint32(ts[:], uint32(info.ModTime().Unix()))
 	hdr = append(hdr, ts[:]...)
 
 	var csz [4]byte
@@ -1009,7 +1058,7 @@ func buildOneEntry(name, path string, info os.FileInfo, password string, multiVo
 	hdr = append(hdr, saltBytes[:]...)
 
 	var ctime [4]byte
-	binary.LittleEndian.PutUint32(ctime[:], dosTS)
+	binary.LittleEndian.PutUint32(ctime[:], uint32(info.ModTime().Unix()))
 	hdr = append(hdr, ctime[:]...)
 
 	hdr = append(hdr, 0, 0, 0, 0)
@@ -1029,4 +1078,8 @@ func buildOneEntry(name, path string, info os.FileInfo, password string, multiVo
 		fileMode:    uint16(info.Mode().Perm()),
 		checkpoints: cps,
 	}, nil
+}
+
+func epochTimestampFromTime(t time.Time) uint32 {
+	return uint32(t.Unix())
 }

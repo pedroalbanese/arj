@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 func flagsByte(password string) byte {
@@ -154,6 +156,41 @@ func extractARJ(path string, patterns []string, password string,
 }
 
 func testARJ(path string, password string) error {
+	// Pre-scan: find the latest entry timestamp and the longest
+	// filename so the header line (created/modified) and the name
+	// column are known before the first "Testing ..." line.
+	nameWidth := 36
+	var maxTS uint32
+
+	pre, err := OpenARJ(path)
+	if err != nil {
+		return err
+	}
+	for {
+		hdr, err := pre.Next()
+		if err != nil {
+			pre.Close()
+			return err
+		}
+		if hdr == nil {
+			break
+		}
+		if len(hdr.Filename) > nameWidth {
+			nameWidth = len(hdr.Filename)
+		}
+		if hdr.Timestamp > maxTS {
+			maxTS = hdr.Timestamp
+		}
+		if err := pre.SkipData(hdr); err != nil {
+			pre.Close()
+			return err
+		}
+	}
+	pre.Close()
+	if nameWidth > 60 {
+		nameWidth = 60
+	}
+
 	a, err := OpenARJ(path)
 	if err != nil {
 		return err
@@ -162,34 +199,82 @@ func testARJ(path string, password string) error {
 
 	a.Password = password
 
+	mh := a.MainHeader()
+
+	// created/modified come from the main header. For HostOS == 0
+	// they are DOS timestamps; otherwise epoch seconds.
+	createdT := time.Unix(int64(mh.Timestamp), 0)
+	modT := time.Unix(int64(mh.Modified), 0)
+	if mh.HostOS == 0 {
+		createdT = dosTimestampToTime(mh.Timestamp)
+		modT = dosTimestampToTime(mh.Modified)
+	}
+	if mh.Modified == 0 {
+		modT = createdT
+	}
+
+	fmt.Printf("Processing archive: %s\n", path)
+	fmt.Printf("Archive created: %s, modified: %s\n",
+		createdT.Format("2006-01-02 15:04:05"),
+		modT.Format("2006-01-02 15:04:05"))
+	fmt.Println()
+
 	type pendingFile struct {
 		hdr     *ARJHeader
 		lastHdr *ARJHeader
 		data    []byte
+		errored bool // already reported an error for this file
 	}
 	var current *pendingFile
 
 	var total, ok int
 
+	// nameWidth is the width of the "Testing <name>" column. 40 is
+	// what the original ARJ 3.10 uses on a 80-column terminal; we
+	// grow it if any filename is longer, capped at 60 so the OK
+	// column never wraps.
+	var names []string
+
+	// shortStatus maps an extraction error to a short label that
+	// fits in the status column, like the original arj does.
+	shortStatus := func(err error) string {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "encrypted file"):
+			return "ENCRYPTED"
+		case strings.Contains(msg, "MAC verification"):
+			return "MAC ERROR"
+		case strings.Contains(msg, "CRC"):
+			return "CRC ERROR"
+		case strings.Contains(msg, "unsupported method"):
+			return "METHOD"
+		default:
+			return "ERROR"
+		}
+	}
+
 	flushCurrent := func() {
 		if current == nil {
 			return
 		}
-		// total was already incremented when the file started.
-		if current.lastHdr != nil &&
-			crc32.ChecksumIEEE(current.data) == current.lastHdr.CRC32 {
-			fmt.Printf("  %s: OK\n", current.hdr.Filename)
+		if current.errored {
+			current = nil
+			return
+		}
+		status := "OK"
+		if current.lastHdr == nil ||
+			crc32.ChecksumIEEE(current.data) != current.lastHdr.CRC32 {
+			status = "CRC ERROR"
+		}
+		date, timeStr := formatTimestamp(current.hdr)
+		name := current.hdr.Filename
+		if len(name) > nameWidth {
+			name = name[:nameWidth]
+		}
+		fmt.Printf("%-*s  %s %s  %-10s\n",
+			nameWidth, name, date, timeStr, status)
+		if status == "OK" {
 			ok++
-		} else {
-			want := uint32(0)
-			if current.lastHdr != nil {
-				want = current.lastHdr.CRC32
-			}
-			fmt.Printf("  %s: CRC MISMATCH (got 0x%08X, want 0x%08X, %d bytes)\n",
-				current.hdr.Filename,
-				crc32.ChecksumIEEE(current.data),
-				want,
-				len(current.data))
 		}
 		current = nil
 	}
@@ -217,18 +302,37 @@ func testARJ(path string, password string) error {
 		if !isContinuation {
 			flushCurrent()
 			current = &pendingFile{hdr: hdr}
-			total++ // count the attempt once per file
+			names = append(names, hdr.Filename)
+			total++ // count the attempt here, once per file
 		}
 		current.lastHdr = hdr
+
+		// Already failed on the first chunk: skip the rest of this
+		// file without trying again, but still consume the payload
+		// so the next header is read from the right position.
+		if current.errored {
+			if err := a.SkipData(hdr); err != nil {
+				flushCurrent()
+				return err
+			}
+			if !hdr.HasFlag(VOLUME_FLAG) {
+				flushCurrent()
+			}
+			continue
+		}
 
 		var buf bytes.Buffer
 		buf.Write(current.data)
 		w := &resizeOnSeek{buf: &buf, pos: int64(buf.Len())}
 		if err := a.ExtractFile(hdr, w); err != nil {
-			// Do NOT increment ok. total already counted the file.
-			// Do NOT call flushCurrent (it would double count).
-			fmt.Printf("  %s: ERROR: %v\n", hdr.Filename, err)
-			current = nil
+			date, timeStr := formatTimestamp(hdr)
+			name := hdr.Filename
+			if len(name) > nameWidth {
+				name = name[:nameWidth]
+			}
+			fmt.Printf("%-*s  %s %s  %-10s\n",
+				nameWidth, name, date, timeStr, shortStatus(err))
+			current.errored = true
 			continue
 		}
 		current.data = append([]byte{}, buf.Bytes()...)
@@ -238,10 +342,20 @@ func testARJ(path string, password string) error {
 		}
 	}
 
-	fmt.Printf("\n%d/%d files OK\n", ok, total)
+	for _, n := range names {
+		if len(n) > nameWidth {
+			nameWidth = len(n)
+			if nameWidth > 60 {
+				nameWidth = 60
+			}
+		}
+	}
+
 	if ok != total {
+		fmt.Printf("%6d/%d file(s)\n", ok, total)
 		return fmt.Errorf("%d file(s) failed", total-ok)
 	}
+	fmt.Printf("%6d file(s)\n", total)
 	return nil
 }
 
@@ -290,3 +404,4 @@ func (w *sliceWriter) Write(b []byte) (int, error) {
 	*w.p = append(*w.p, b...)
 	return len(b), nil
 }
+

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -59,6 +60,7 @@ type ARJHeader struct {
 	FileType        uint8
 	PasswordMod     uint8
 	Timestamp       uint32
+	Modified        uint32
 	CompressedSize  uint32
 	OriginalSize    uint32
 	CRC32           uint32
@@ -289,6 +291,9 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 			hdr.HostData = binary.LittleEndian.Uint16(basicHdr[pos+2:])
 			pos += 4
 		}
+		if len(basicHdr) >= 34 {
+			hdr.Modified = binary.LittleEndian.Uint32(basicHdr[30:34])
+		}
 	} else {
 		resumeOff := 28
 		if hdr.FirstHdrSize >= FIRST_HDR_SIZE_V {
@@ -498,6 +503,7 @@ func listARJ(path string) error {
 		size uint64
 		date string
 		time string
+		enc  bool // true if the entry is encrypted (GARBLED_FLAG)
 	}
 	var entries []entry
 	var maxSize uint64
@@ -533,12 +539,13 @@ func listARJ(path string) error {
 
 		if !isContinuation {
 			flushCurrent()
-			date, timeStr := dosTimestamp(hdr.Timestamp)
+			date, timeStr := formatTimestamp(hdr)
 			current = &entry{
 				hdr:  hdr,
 				size: uint64(hdr.OriginalSize),
 				date: date,
 				time: timeStr,
+				enc:  hdr.HasFlag(GARBLED_FLAG),
 			}
 		} else {
 			// Accumulate the chunk's OriginalSize.
@@ -560,37 +567,58 @@ func listARJ(path string) error {
 		sizeWidth = 9
 	}
 
-	fmt.Printf("Archive: %s\n", path)
+	createdT := time.Unix(int64(mh.Timestamp), 0)
+	modT := time.Unix(int64(mh.Modified), 0)
+	if mh.HostOS == 0 {
+		createdT = dosTimestampToTime(mh.Timestamp)
+		modT = dosTimestampToTime(mh.Modified)
+	}
+	if mh.Modified == 0 {
+		modT = createdT
+	}
+
+	fmt.Printf("Processing archive: %s\n", path)
+	fmt.Printf("Archive created: %s, modified: %s\n",
+		createdT.Format("2006-01-02 15:04:05"),
+		modT.Format("2006-01-02 15:04:05"))
+	fmt.Println()
 	fmt.Printf("  Version: %d.%02d  Host OS: %d  Flags: 0x%02X\n",
 		mh.Version/10, mh.Version%10, mh.HostOS, mh.Flags)
 	fmt.Println()
 
-	fmt.Printf("  %-*s  %-10s %-5s %-10s %s\n",
-		sizeWidth, "Length", "Date", "Time", "Mode", "Name")
-	fmt.Printf("  %s  %s %s %s %s\n",
+	fmt.Printf("  %-*s  %-10s %-5s %-9s %-3s %s\n",
+		sizeWidth, "Length", "Date", "Time", "Mode", "Enc", "Name")
+	fmt.Printf("  %s  %s %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
 		strings.Repeat("-", 5),
-		strings.Repeat("-", 10),
+		strings.Repeat("-", 9),
+		strings.Repeat("-", 3),
 		"----")
 
 	for _, e := range entries {
 		mode := formatFileMode(e.hdr.FileAccessMode)
-		fmt.Printf("  %*d  %-10s %-5s %-10s %s\n",
-			sizeWidth, e.size, e.date, e.time, mode, e.hdr.Filename)
+		enc := " - "
+		if e.enc {
+			enc = " E "
+		}
+		fmt.Printf("  %*d  %-10s %-5s %-9s %s %s\n",
+			sizeWidth, e.size, e.date, e.time, mode, enc, e.hdr.Filename)
 	}
 
-	fmt.Printf("  %s  %s %s %s %s\n",
+	fmt.Printf("  %s  %s %s %s %s %s\n",
 		strings.Repeat("-", sizeWidth),
 		strings.Repeat("-", 10),
 		strings.Repeat("-", 5),
-		strings.Repeat("-", 10),
+		strings.Repeat("-", 9),
+		strings.Repeat("-", 3),
 		"-------")
-	fmt.Printf("  %*d  %s %s %s %d files\n",
+	fmt.Printf("  %*d  %s %s %s %s %d files\n",
 		sizeWidth, total,
 		strings.Repeat(" ", 10),
 		strings.Repeat(" ", 5),
-		strings.Repeat(" ", 10),
+		strings.Repeat(" ", 9),
+		strings.Repeat(" ", 3),
 		len(entries))
 
 	return nil
@@ -614,14 +642,17 @@ func formatFileMode(mode uint16) string {
 	return sb.String()
 }
 
-func dosTimestamp(ts uint32) (string, string) {
-	sec := int(ts&0x1F) * 2
-	min := int((ts >> 5) & 0x3F)
-	hour := int((ts >> 11) & 0x1F)
-	day := int((ts >> 16) & 0x1F)
-	month := int((ts >> 21) & 0x0F)
-	year := int((ts>>25)&0x7F) + 1980
-	_ = sec
-	return fmt.Sprintf("%04d-%02d-%02d", year, month, day),
-		fmt.Sprintf("%02d:%02d", hour, min)
+func timestampFromHeader(hdr *ARJHeader) time.Time {
+	if hdr.HostOS == 0 {
+		return dosTimestampToTime(hdr.Timestamp)
+	}
+	return time.Unix(int64(hdr.Timestamp), 0)
+}
+
+func formatTimestamp(hdr *ARJHeader) (string, string) {
+	t := time.Unix(int64(hdr.Timestamp), 0)
+	if hdr.HostOS == 0 {
+		t = dosTimestampToTime(hdr.Timestamp)
+	}
+	return t.Format("2006-01-02"), t.Format("15:04")
 }
