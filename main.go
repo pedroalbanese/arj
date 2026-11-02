@@ -906,7 +906,13 @@ func writeMainHeader(w io.Writer, archiveName string, password string,
 	hdr = append(hdr, 0)
 
 	var ts [4]byte
+
+	// created at hdr[8:12]  (file offset 0x0C)
 	binary.LittleEndian.PutUint32(ts[:], uint32(created.Unix()))
+	hdr = append(hdr, ts[:]...)
+
+	// modified at hdr[12:16] (file offset 0x10), immediately after created
+	binary.LittleEndian.PutUint32(ts[:], uint32(modified.Unix()))
 	hdr = append(hdr, ts[:]...)
 
 	for i := 0; i < 12; i++ {
@@ -917,8 +923,6 @@ func writeMainHeader(w io.Writer, archiveName string, password string,
 	hdr = append(hdr, 0, 0)
 	hdr = append(hdr, 0, 0)
 	hdr = append(hdr, 0, 0)
-
-	binary.LittleEndian.PutUint32(hdr[30:34], uint32(modified.Unix()))
 
 	base := filepath.Base(archiveName)
 	hdr = append(hdr, []byte(base)...)
