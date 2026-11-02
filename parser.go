@@ -291,8 +291,8 @@ func (a *ARJArchive) readHeader(first bool) (*ARJHeader, error) {
 			hdr.HostData = binary.LittleEndian.Uint16(basicHdr[pos+2:])
 			pos += 4
 		}
-		if len(basicHdr) >= 34 {
-			hdr.Modified = binary.LittleEndian.Uint32(basicHdr[30:34])
+		if len(basicHdr) >= 16 {
+			hdr.Modified = binary.LittleEndian.Uint32(basicHdr[12:16])
 		}
 	} else {
 		resumeOff := 28
