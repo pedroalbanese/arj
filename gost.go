@@ -5,13 +5,12 @@ import (
 	"crypto/hmac"
 	"encoding/binary"
 
-	"github.com/pedroalbanese/gogost/gost3412128"
-	"github.com/pedroalbanese/gogost/gost34112012256"
+	kuznyechik "github.com/pedroalbanese/kuznechik"
 )
 
 const (
-	KuznyechikBlockSize = gost3412128.BlockSize // 16
-	KuznyechikKeySize   = gost3412128.KeySize   // 32
+	KuznyechikBlockSize = kuznyechik.BlockSize // 16
+	KuznyechikKeySize   = 32                   // 32
 
 	pbkdf2Iterations = 4096
 	pbkdf2KeyLen     = 64 // 32 enc + 32 mac
@@ -23,29 +22,33 @@ const (
 )
 
 func newKuznyechikCipher(key []byte) cipher.Block {
-	return gost3412128.NewCipher(key)
+	c, err := kuznyechik.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	return c
 }
 
 func streebogSum256(data []byte) []byte {
-	h := gost34112012256.New()
+	h := New256()
 	h.Write(data)
 	return h.Sum(nil)
 }
 
 func hmacStreebog256(key, data []byte) []byte {
-	mac := hmac.New(gost34112012256.New, key)
+	mac := hmac.New(New256, key)
 	mac.Write(data)
 	return mac.Sum(nil)
 }
 
 func pbkdf2Streebog256(password, salt []byte, iter, keyLen int) []byte {
 	prf := func(key, data []byte) []byte {
-		mac := hmac.New(gost34112012256.New, key)
+		mac := hmac.New(New256, key)
 		mac.Write(data)
 		return mac.Sum(nil)
 	}
 
-	hashLen := gost34112012256.Size
+	hashLen := 32
 	numBlocks := (keyLen + hashLen - 1) / hashLen
 	dk := make([]byte, 0, numBlocks*hashLen)
 
